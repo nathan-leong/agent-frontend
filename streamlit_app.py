@@ -12,15 +12,15 @@ import boto3
 import streamlit as st
 from urllib.parse import quote
 
-logging.basicConfig(level=logging.DEBUG)  # root handler; optional if you only set botocore
-boto3.set_stream_logger("botocore", logging.DEBUG)
+# logging.basicConfig(level=logging.DEBUG)  # root handler; optional if you only set botocore
+# boto3.set_stream_logger("botocore", logging.DEBUG)
 # optional: see lower-level HTTP details
-logging.getLogger("urllib3").setLevel(logging.DEBUG)
+# logging.getLogger("urllib3").setLevel(logging.DEBUG)
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Sample 10: Runtime Auth",
+    page_title="NEXTGEN AWS AI Agent",
     page_icon="\U0001f510",
     layout="wide",
 )
@@ -462,12 +462,8 @@ with st.sidebar:
         st.markdown(":red-background[No token — requests will get 403]")
 
 # --- Main area ---
-st.markdown("#### AWS Helper Agent")
-st.markdown("""
-```
-Inbound:   You ──[JWT Token]──▶ AgentCore Runtime (validates via Cognito)
-```
-""")
+st.markdown("#### NEXTGEN AWS AI Agent")
+
 # st.caption("Clear the Bearer Token in the sidebar to see a 403 rejection. The agent retrieves the API key from AgentCore Identity — never hardcoded. The agent is deployed in AWS using AgentCore.")
 
 # Chat history
@@ -476,18 +472,21 @@ for msg in st.session_state.chat_history:
         st.markdown(_format_response(msg["content"]))
 
 # Preset buttons
-presets = [
-    "What can you do?",
-    "Tell me the most recently created opportunity.",
-    "What are the requirements for Think Big for Small Businesses program for a partner to reach advanced tier?"
-]
-preset_cols = st.columns(len(presets))
-prompt_to_send: str | None = None
+prompt_to_send = None
 
-for i, preset in enumerate(presets):
-    with preset_cols[i]:
-        if st.button(preset, key=f"preset_{i}", use_container_width=True):
-            prompt_to_send = preset
+if len(st.session_state.chat_history) == 0:
+    presets = [
+        "What can you do?",
+        "Tell me the most recently created opportunity.",
+        "What are the requirements for Think Big for Small Businesses program for a partner to reach advanced tier?"
+    ]
+
+    preset_cols = st.columns(len(presets))
+
+    for i, preset in enumerate(presets):
+        with preset_cols[i]:
+            if st.button(preset, key=f"preset_{i}", use_container_width=True):
+                prompt_to_send = preset
 
 # Chat input
 user_input = st.chat_input("Ask the agent...")
@@ -512,19 +511,27 @@ if prompt_to_send:
             streamed_text = [""]
             first_chunk_received = [False]
 
-            # Spinner container (so we can clear it)
             spinner_container = st.empty()
-
             with spinner_container:
                 st.spinner("Invoking agent...")
 
+            # 🔥 Initialize message in chat history BEFORE streaming
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": "",
+            })
+            message_index = len(st.session_state.chat_history) - 1
+
             def handle_chunk(chunk):
-                # 🔥 First chunk → remove spinner
                 if not first_chunk_received[0]:
                     first_chunk_received[0] = True
                     spinner_container.empty()
 
                 streamed_text[0] += chunk
+
+                # 🔥 Persist LIVE into session state
+                st.session_state.chat_history[message_index]["content"] = streamed_text[0]
+
                 placeholder.markdown(_format_response(streamed_text[0]))
 
             result = _invoke_agent_streaming(
@@ -535,7 +542,6 @@ if prompt_to_send:
                 on_chunk=handle_chunk,
             )
 
-            # Edge case: no chunks ever arrived (error or empty response)
             if not first_chunk_received[0]:
                 spinner_container.empty()
 # Last request details (collapsed)
