@@ -1,8 +1,4 @@
 """
-Streamlit UI for AgentCore Identity Sample 10: Runtime Inbound + Outbound Auth.
-
-Demonstrates invoking an AgentCore Runtime with and without a Cognito JWT bearer token.
-
 Usage:
     streamlit run streamlit_app.py
 """
@@ -11,9 +7,10 @@ import json
 import os
 import time
 import logging
-
+import httpx
 import boto3
 import streamlit as st
+from urllib.parse import quote
 
 logging.basicConfig(level=logging.DEBUG)  # root handler; optional if you only set botocore
 boto3.set_stream_logger("botocore", logging.DEBUG)
@@ -164,42 +161,72 @@ def _sse_stream_to_plain_text(s: str) -> str:
             out.append(payload)
     return "".join(out) if out else s
 
+def _invoke_agent_streaming(
+    agent_arn: str,
+    region: str,
+    prompt: str,
+    bearer_token: str | None = None,
+    on_chunk=None,  # callback for streaming UI
+) -> dict:
+    url = f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{quote(agent_arn, safe='')}/invocations?qualifier=DEFAULT"
 
-def _invoke_agent(agent_arn: str, region: str, prompt: str, bearer_token: str | None = None) -> dict:
-    """
-    Invoke the agent runtime, optionally with a bearer token.
-
-    Returns a dict with keys: success, text, elapsed, error, status_code.
-    """
-    client = boto3.client("bedrock-agentcore", region_name=region)
-    handler = None
+    headers = {
+        "Content-Type": "application/json",
+    }
 
     if bearer_token:
-        def _inject_bearer(request, **kwargs):
-            request.headers["Authorization"] = f"Bearer {bearer_token}"
+        headers["Authorization"] = f"Bearer {bearer_token}"
 
-        handler = _inject_bearer
-        client.meta.events.register(
-            "before-send.bedrock-agentcore.InvokeAgentRuntime", handler
-        )
+    payload = {"prompt": prompt}
 
     t0 = time.time()
+    full_text = []
+
     try:
-        resp = client.invoke_agent_runtime(
-            agentRuntimeArn=agent_arn,
-            runtimeUserId="testuser",
-            qualifier="DEFAULT",
-            payload=json.dumps({"prompt": prompt}),
-        )
+        with httpx.Client(timeout=None) as client:
+            with client.stream("POST", url, headers=headers, json=payload) as resp:
+                resp.raise_for_status()
+
+                # Stream line-by-line (SSE format)
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+
+                    line = line.strip()
+
+                    if not line.startswith("data:"):
+                        continue
+
+                    data = line[5:].strip()
+
+                    if data == "[DONE]":
+                        break
+
+                    try:
+                        chunk = json.loads(data)
+                        if isinstance(chunk, str):
+                            text = chunk
+                        else:
+                            text = str(chunk)
+                    except json.JSONDecodeError:
+                        text = data
+
+                    full_text.append(text)
+
+                    # 🔥 STREAM OUT
+                    if on_chunk:
+                        on_chunk(text)
+
         elapsed = time.time() - t0
-        text = _parse_event_stream(resp)
+
         return {
             "success": True,
-            "text": text,
+            "text": "".join(full_text),
             "elapsed": elapsed,
             "error": None,
-            "status_code": resp.get("ResponseMetadata", {}).get("HTTPStatusCode"),
+            "status_code": resp.status_code,
         }
+
     except Exception as exc:
         elapsed = time.time() - t0
         return {
@@ -207,13 +234,10 @@ def _invoke_agent(agent_arn: str, region: str, prompt: str, bearer_token: str | 
             "text": None,
             "elapsed": elapsed,
             "error": f"{type(exc).__name__}: {exc}",
-            "status_code": getattr(exc, "response", {}).get("ResponseMetadata", {}).get("HTTPStatusCode"),
+            "status_code": getattr(exc, "response", None).status_code
+            if hasattr(exc, "response") and exc.response
+            else None,
         }
-    finally:
-        if handler:
-            client.meta.events.unregister(
-                "before-send.bedrock-agentcore.InvokeAgentRuntime", handler
-            )
 
 
 def _format_response(text: str) -> str:
@@ -328,18 +352,7 @@ if not st.session_state.logged_in:
 
     with center:
         st.markdown(
-            "<h1 class='login-header'>AgentCore Runtime Auth Demo</h1>",
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            "<p class='login-subtitle'>Sample 10: Inbound JWT + Outbound API Key</p>",
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            "<p class='login-desc'>"
-            "This demo shows how AgentCore Runtime validates inbound JWT tokens "
-            "and retrieves outbound API keys securely."
-            "</p>",
+            "<h1 class='login-header'>NEXTGEN AWS AI Assistant</h1>",
             unsafe_allow_html=True,
         )
 
@@ -464,9 +477,9 @@ for msg in st.session_state.chat_history:
 
 # Preset buttons
 presets = [
-    "What's the weather in Seattle?",
-    "Calculate 5 * 7 + 3",
     "What can you do?",
+    "Tell me the most recently created opportunity.",
+    "What are the requirements for Think Big for Small Businesses program for a partner to reach advanced tier?"
 ]
 preset_cols = st.columns(len(presets))
 prompt_to_send: str | None = None
@@ -494,31 +507,37 @@ if prompt_to_send:
             st.markdown(prompt_to_send)
 
         with st.chat_message("assistant"):
-            with st.spinner("Invoking agent..."):
-                result = _invoke_agent(
-                    st.session_state.agent_arn,
-                    st.session_state.region,
-                    prompt_to_send,
-                    bearer_token=st.session_state.get("bearer_input", "").strip() or None,
-                )
+            placeholder = st.empty()
 
-            truncated = st.session_state.jwt_token[:20] + "..."
-            st.session_state.last_request = {"auth": f"Bearer {truncated}", **result}
+            streamed_text = [""]
+            first_chunk_received = [False]
 
-            if result["success"]:
-                display_text = _format_response(result["text"])
-                st.markdown(display_text)
-                st.session_state.chat_history.append({
-                    "role": "assistant",
-                    "content": result["text"],
-                })
-            else:
-                st.error(result["error"])
-                st.session_state.chat_history.append({
-                    "role": "assistant",
-                    "content": f"Error: {result['error']}",
-                })
+            # Spinner container (so we can clear it)
+            spinner_container = st.empty()
 
+            with spinner_container:
+                st.spinner("Invoking agent...")
+
+            def handle_chunk(chunk):
+                # 🔥 First chunk → remove spinner
+                if not first_chunk_received[0]:
+                    first_chunk_received[0] = True
+                    spinner_container.empty()
+
+                streamed_text[0] += chunk
+                placeholder.markdown(_format_response(streamed_text[0]))
+
+            result = _invoke_agent_streaming(
+                st.session_state.agent_arn,
+                st.session_state.region,
+                prompt_to_send,
+                bearer_token=st.session_state.get("bearer_input", "").strip() or None,
+                on_chunk=handle_chunk,
+            )
+
+            # Edge case: no chunks ever arrived (error or empty response)
+            if not first_chunk_received[0]:
+                spinner_container.empty()
 # Last request details (collapsed)
 if st.session_state.last_request:
     with st.expander("Last request details", expanded=False):
