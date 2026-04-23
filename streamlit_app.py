@@ -20,8 +20,8 @@ from urllib.parse import quote
 # Page config
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="NEXTGEN AWS AI Agent",
-    page_icon="\U0001f510",
+    page_title="NEXTGEN PDM Agent",
+    page_icon="nextgen logo.png",
     layout="wide",
 )
 
@@ -351,8 +351,13 @@ if not st.session_state.logged_in:
     _, center, _ = st.columns([1, 2, 1])
 
     with center:
+        # Display logo
+        logo_col1, logo_col2, logo_col3 = st.columns([1, 1, 1])
+        with logo_col2:
+            st.image("nextgen logo.png", width=150)
+
         st.markdown(
-            "<h1 class='login-header'>NEXTGEN AWS AI Assistant</h1>",
+            "<h1 class='login-header'>NEXTGEN Partner Development Manager Agent</h1>",
             unsafe_allow_html=True,
         )
 
@@ -462,7 +467,12 @@ with st.sidebar:
         st.markdown(":red-background[No token — requests will get 403]")
 
 # --- Main area ---
-st.markdown("#### NEXTGEN AWS AI Agent")
+# Display logo in the app
+logo_left, logo_right = st.columns([1, 9])
+with logo_left:
+    st.image("nextgen logo.png", width=50)
+with logo_right:
+    st.markdown("#### NEXTGEN Partner Development Manager Agent")
 
 # st.caption("Clear the Bearer Token in the sidebar to see a 403 rejection. The agent retrieves the API key from AgentCore Identity — never hardcoded. The agent is deployed in AWS using AgentCore.")
 
