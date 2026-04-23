@@ -500,9 +500,9 @@ prompt_to_send = None
 if len(st.session_state.chat_history) == 0:
     presets = [
         "What can you do?",
-        "Show me all opportunities created this month, and present potential funding mechanisms.",
-        "Show me .",
-        "What are the requirements for Think Big for Small Businesses program for a partner to reach advanced tier?"
+        "Show me all opportunities created this month.",
+        "How much discounts do software partners receive through the distribution program discounts?",
+        "What are the requirements for a partner to become Advanced Tier?"
     ]
 
     preset_cols = st.columns(len(presets))
