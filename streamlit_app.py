@@ -7,6 +7,7 @@ import json
 import os
 import time
 import logging
+import uuid
 import httpx
 import boto3
 import streamlit as st
@@ -166,6 +167,7 @@ def _invoke_agent_streaming(
     region: str,
     prompt: str,
     bearer_token: str | None = None,
+    session_id: str | None = None,
     on_chunk=None,  # callback for streaming UI
 ) -> dict:
     url = f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{quote(agent_arn, safe='')}/invocations?qualifier=DEFAULT"
@@ -176,6 +178,9 @@ def _invoke_agent_streaming(
 
     if bearer_token:
         headers["Authorization"] = f"Bearer {bearer_token}"
+
+    if session_id:
+        headers["X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"] = session_id
 
     payload = {"prompt": prompt}
 
@@ -265,6 +270,7 @@ for key, default in {
     "region": "us-east-1",
     "last_request": None,
     "login_error": None,
+    "session_id": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -409,6 +415,7 @@ if not st.session_state.logged_in:
                     st.session_state.logged_in = True
                     st.session_state.agent_arn = agent_arn
                     st.session_state.region = config.get("region", "us-east-1")
+                    st.session_state.session_id = str(uuid.uuid4())  # Generate session ID
                     st.session_state.login_error = None
                     st.rerun()
 
@@ -444,6 +451,12 @@ with st.sidebar:
         f"<p class='sidebar-meta'><b>Region:</b> {st.session_state.region}</p>",
         unsafe_allow_html=True,
     )
+
+    if st.session_state.session_id:
+        st.markdown(
+            f"<p class='sidebar-meta'><b>Session ID:</b> {st.session_state.session_id[:8]}...</p>",
+            unsafe_allow_html=True,
+        )
 
     if st.button("Sign Out", use_container_width=True):
         for key in list(st.session_state.keys()):
@@ -487,7 +500,8 @@ prompt_to_send = None
 if len(st.session_state.chat_history) == 0:
     presets = [
         "What can you do?",
-        "Tell me the most recently created opportunity.",
+        "Show me all opportunities created this month, and present potential funding mechanisms.",
+        "Show me .",
         "What are the requirements for Think Big for Small Businesses program for a partner to reach advanced tier?"
     ]
 
@@ -549,6 +563,7 @@ if prompt_to_send:
                 st.session_state.region,
                 prompt_to_send,
                 bearer_token=st.session_state.get("bearer_input", "").strip() or None,
+                session_id=st.session_state.get("session_id"),
                 on_chunk=handle_chunk,
             )
 
