@@ -9,11 +9,14 @@ import time
 import logging
 import uuid
 import io
+import re
+import tempfile
 import httpx
 import boto3
 import streamlit as st
 from urllib.parse import quote
 from docx import Document
+from markdown_pdf import MarkdownPdf, Section
 
 # logging.basicConfig(level=logging.DEBUG)  # root handler; optional if you only set botocore
 # boto3.set_stream_logger("botocore", logging.DEBUG)
@@ -282,6 +285,31 @@ def _create_word_document(question: str, answer: str, username: str) -> io.Bytes
     return buffer
 
 
+def _markdown_to_pdf(markdown_content: str) -> bytes:
+    """Convert markdown content to PDF using markdown-pdf library."""
+    temp_pdf_path = tempfile.mktemp(suffix='.pdf')
+
+    try:
+        # Convert markdown to PDF - pass content directly
+        pdf = MarkdownPdf()
+        pdf.add_section(Section(markdown_content, toc=False))
+        pdf.meta["title"] = "Agent Response"
+        pdf.save(temp_pdf_path)
+
+        # Read the PDF bytes
+        with open(temp_pdf_path, 'rb') as f:
+            pdf_bytes = f.read()
+
+        return pdf_bytes
+    finally:
+        # Clean up temp file
+        try:
+            if os.path.exists(temp_pdf_path):
+                os.unlink(temp_pdf_path)
+        except:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Session state initialisation
 # ---------------------------------------------------------------------------
@@ -490,19 +518,42 @@ with st.sidebar:
 
     st.divider()
 
-    # Bearer token — auto-filled, user can clear to test 403
-    st.markdown("**Bearer Token**")
-    st.caption("Auto-filled after login. Clear to test 403 rejection.")
-    bearer_input = st.text_area(
-        "Bearer Token",
-        height=80,
-        key="bearer_input",
-        label_visibility="collapsed",
-    )
-    if bearer_input.strip():
-        st.markdown(":green-background[Token will be sent]")
-    else:
-        st.markdown(":red-background[No token — requests will get 403]")
+    # --- Tools Section ---
+    st.markdown("### 🛠️ Tools")
+
+    # Tool 1: Copy Bearer Token
+    with st.expander("📋 Copy Bearer Token", expanded=False):
+        if st.session_state.jwt_token:
+            st.code(st.session_state.jwt_token, language=None)
+            st.caption("Copy the token above to use in other applications.")
+        else:
+            st.info("No token available")
+
+    # Tool 2: Markdown to PDF Converter
+    with st.expander("📄 Markdown to PDF Converter", expanded=False):
+        uploaded_file = st.file_uploader(
+            "Upload markdown file",
+            type=['md', 'markdown'],
+            key="md_uploader",
+            label_visibility="collapsed"
+        )
+
+        if uploaded_file is not None:
+            # Read the markdown content
+            markdown_content = uploaded_file.read().decode('utf-8')
+
+            # Convert to PDF
+            pdf_bytes = _markdown_to_pdf(markdown_content)
+
+            # Download button
+            st.download_button(
+                label="⬇️ Download PDF",
+                data=pdf_bytes,
+                file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}.pdf",
+                mime="application/pdf",
+                key="md_to_pdf_download",
+                use_container_width=True
+            )
 
 # --- Main area ---
 # Display logo in the app
