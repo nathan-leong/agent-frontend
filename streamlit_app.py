@@ -8,10 +8,12 @@ import os
 import time
 import logging
 import uuid
+import io
 import httpx
 import boto3
 import streamlit as st
 from urllib.parse import quote
+from docx import Document
 
 # logging.basicConfig(level=logging.DEBUG)  # root handler; optional if you only set botocore
 # boto3.set_stream_logger("botocore", logging.DEBUG)
@@ -257,6 +259,29 @@ def _truncate_arn(arn: str, max_len: int = 45) -> str:
     return arn[: max_len - 3] + "..."
 
 
+def _create_markdown_file(question: str, answer: str, username: str) -> str:
+    """Create a markdown string with the agent's response."""
+    return answer
+
+
+def _create_word_document(question: str, answer: str, username: str) -> io.BytesIO:
+    """Create a Word document with the agent's response."""
+    doc = Document()
+
+    # Add answer - split by lines and add as paragraphs
+    for line in answer.split('\n'):
+        if line.strip():
+            doc.add_paragraph(line)
+        else:
+            doc.add_paragraph("")
+
+    # Save to BytesIO
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+
 # ---------------------------------------------------------------------------
 # Session state initialisation
 # ---------------------------------------------------------------------------
@@ -490,9 +515,51 @@ with logo_right:
 # st.caption("Clear the Bearer Token in the sidebar to see a 403 rejection. The agent retrieves the API key from AgentCore Identity — never hardcoded. The agent is deployed in AWS using AgentCore.")
 
 # Chat history
-for msg in st.session_state.chat_history:
+for i, msg in enumerate(st.session_state.chat_history):
     with st.chat_message(msg["role"]):
         st.markdown(_format_response(msg["content"]))
+
+    # Add download buttons for assistant responses (outside chat_message)
+    if msg["role"] == "assistant" and msg["content"]:
+        # Find the corresponding user question
+        user_question = ""
+        if i > 0 and st.session_state.chat_history[i-1]["role"] == "user":
+            user_question = st.session_state.chat_history[i-1]["content"]
+
+        # Create markdown content
+        markdown_content = _create_markdown_file(
+            user_question,
+            msg["content"],
+            st.session_state.username
+        )
+
+        # Create Word document
+        doc_buffer = _create_word_document(
+            user_question,
+            msg["content"],
+            st.session_state.username
+        )
+
+        # Add download buttons with small styling
+        col1, col2, col3, col4 = st.columns([1, 2, 2, 5])
+        with col2:
+            st.download_button(
+                label="📄 Markdown",
+                data=markdown_content,
+                file_name=f"agent_response_{time.strftime('%Y%m%d_%H%M%S')}.md",
+                mime="text/markdown",
+                key=f"download_md_{i}",
+                use_container_width=True
+            )
+        with col3:
+            st.download_button(
+                label="📘 Word",
+                data=doc_buffer,
+                file_name=f"agent_response_{time.strftime('%Y%m%d_%H%M%S')}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key=f"download_docx_{i}",
+                use_container_width=True
+            )
 
 # Preset buttons
 prompt_to_send = None
@@ -569,6 +636,9 @@ if prompt_to_send:
 
             if not first_chunk_received[0]:
                 spinner_container.empty()
+
+            # Rerun to show download buttons
+            st.rerun()
 # Last request details (collapsed)
 if st.session_state.last_request:
     with st.expander("Last request details", expanded=False):
