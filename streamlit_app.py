@@ -17,6 +17,7 @@ import streamlit as st
 from urllib.parse import quote
 from docx import Document
 from markdown_pdf import MarkdownPdf, Section
+import fitz  # PyMuPDF
 
 # logging.basicConfig(level=logging.DEBUG)  # root handler; optional if you only set botocore
 # boto3.set_stream_logger("botocore", logging.DEBUG)
@@ -286,26 +287,68 @@ def _create_word_document(question: str, answer: str, username: str) -> io.Bytes
 
 
 def _markdown_to_pdf(markdown_content: str) -> bytes:
-    """Convert markdown content to PDF using markdown-pdf library."""
+    """Convert markdown content to PDF using markdown-pdf library with logo."""
     temp_pdf_path = tempfile.mktemp(suffix='.pdf')
+    temp_pdf_with_logo = tempfile.mktemp(suffix='.pdf')
 
     try:
+        # Add HTML spacing at the top for logo
+
         # Convert markdown to PDF - pass content directly
         pdf = MarkdownPdf()
         pdf.add_section(Section(markdown_content, toc=False))
-        pdf.meta["title"] = "Agent Response"
+        pdf.meta["title"] = "Document"
         pdf.save(temp_pdf_path)
 
-        # Read the PDF bytes
-        with open(temp_pdf_path, 'rb') as f:
+        # Add logo and increase top margin using PyMuPDF
+        logo_path = os.path.join(SAMPLE_DIR, "nextgen logo.png")
+        doc = fitz.open(temp_pdf_path)
+
+        # Create new document with shifted content
+        new_doc = fitz.open()
+        shift_down = 30  # 80 points = ~1.1 inches extra top margin
+
+        for page_num, page in enumerate(doc):
+            # Create new page with same dimensions
+            new_page = new_doc.new_page(width=page.rect.width, height=page.rect.height)
+
+            # Copy page content with vertical offset (shift down)
+            new_page.show_pdf_page(
+                new_page.rect + (0, shift_down, 0, 0),  # Shift down by 80 points
+                doc,
+                page_num
+            )
+
+            # Add logo to every page
+            if os.path.exists(logo_path):
+                logo_size = 40
+                margin = 15
+                page_width = new_page.rect.width
+                x0 = page_width - logo_size - margin
+                y0 = margin
+                x1 = page_width - margin
+                y1 = margin + logo_size
+
+                rect = fitz.Rect(x0, y0, x1, y1)
+                new_page.insert_image(rect, filename=logo_path, keep_proportion=True)
+
+        # Save the modified document
+        new_doc.save(temp_pdf_with_logo)
+        new_doc.close()
+        doc.close()
+
+        # Read the modified PDF
+        with open(temp_pdf_with_logo, 'rb') as f:
             pdf_bytes = f.read()
 
         return pdf_bytes
     finally:
-        # Clean up temp file
+        # Clean up temp files
         try:
             if os.path.exists(temp_pdf_path):
                 os.unlink(temp_pdf_path)
+            if os.path.exists(temp_pdf_with_logo):
+                os.unlink(temp_pdf_with_logo)
         except:
             pass
 
