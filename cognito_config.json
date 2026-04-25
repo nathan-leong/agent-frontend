@@ -1,6 +1,7 @@
 {
-  "pool_id": "ap-southeast-2_WP3epXmwl",
+  "user_pool_id": "ap-southeast-2_WP3epXmwl",
   "client_id": "dgb7bris2hso7jqa9ieqdp7rq",
   "discovery_url": "https://cognito-idp.ap-southeast-2.amazonaws.com/ap-southeast-2_WP3epXmwl/.well-known/openid-configuration",
-  "region": "ap-southeast-2"
+  "region": "ap-southeast-2",
+  "identity_pool_id": "ap-southeast-2:963b136e-4dc6-4e2d-9fa6-ec14fe06ec7c"
 }

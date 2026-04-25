@@ -108,6 +108,470 @@ def _get_bearer_token(config: dict) -> str:
     return auth["AuthenticationResult"]["AccessToken"]
 
 
+def _get_aws_credentials_from_cognito(id_token: str, identity_pool_id: str, user_pool_id: str, region: str) -> dict:
+    """Exchange Cognito ID token for AWS credentials via Identity Pool."""
+    cognito_identity = boto3.client('cognito-identity', region_name=region)
+
+    # Construct the login key for the user pool
+    login_key = f'cognito-idp.{region}.amazonaws.com/{user_pool_id}'
+    print(login_key)
+    # Get Identity ID
+    identity_response = cognito_identity.get_id(
+        IdentityPoolId=identity_pool_id,
+        Logins={
+            login_key: id_token
+        }
+    )
+    print('Identity Response')
+    identity_id = identity_response['IdentityId']
+
+    # Get credentials for the identity
+    credentials_response = cognito_identity.get_credentials_for_identity(
+        IdentityId=identity_id,
+        Logins={
+            login_key: id_token
+        }
+    )
+
+    return credentials_response['Credentials']
+
+
+def _list_s3_objects(bucket_name: str, prefix: str = "", delimiter: str = "") -> dict:
+    """List objects in S3 bucket using temporary credentials."""
+    if 'aws_credentials' not in st.session_state:
+        return {'files': [], 'folders': []}
+
+    creds = st.session_state.aws_credentials
+    s3_client = boto3.client(
+        's3',
+        aws_access_key_id=creds['AccessKeyId'],
+        aws_secret_access_key=creds['SecretKey'],
+        aws_session_token=creds['SessionToken'],
+        region_name='ap-southeast-2'
+    )
+
+    try:
+        params = {'Bucket': bucket_name, 'Prefix': prefix}
+        if delimiter:
+            params['Delimiter'] = delimiter
+
+        response = s3_client.list_objects_v2(**params)
+
+        # Get folders (CommonPrefixes)
+        folders = [p['Prefix'] for p in response.get('CommonPrefixes', [])]
+
+        # Get files (Contents) that are not folders
+        files = [obj for obj in response.get('Contents', []) if not obj['Key'].endswith('/')]
+
+        return {'files': files, 'folders': folders}
+    except Exception as e:
+        st.error(f"Error listing objects: {e}")
+        return {'files': [], 'folders': []}
+
+
+def _upload_to_s3(bucket_name: str, file_obj, key: str) -> bool:
+    """Upload file to S3 bucket."""
+    if 'aws_credentials' not in st.session_state:
+        return False
+
+    creds = st.session_state.aws_credentials
+    s3_client = boto3.client(
+        's3',
+        aws_access_key_id=creds['AccessKeyId'],
+        aws_secret_access_key=creds['SecretKey'],
+        aws_session_token=creds['SessionToken'],
+        region_name='ap-southeast-2'
+    )
+
+    try:
+        s3_client.upload_fileobj(file_obj, bucket_name, key)
+        return True
+    except Exception as e:
+        st.error(f"Error uploading: {e}")
+        return False
+
+
+def _download_from_s3(bucket_name: str, key: str) -> bytes:
+    """Download file from S3 bucket."""
+    if 'aws_credentials' not in st.session_state:
+        return None
+
+    creds = st.session_state.aws_credentials
+    s3_client = boto3.client(
+        's3',
+        aws_access_key_id=creds['AccessKeyId'],
+        aws_secret_access_key=creds['SecretKey'],
+        aws_session_token=creds['SessionToken'],
+        region_name='ap-southeast-2'
+    )
+
+    try:
+        response = s3_client.get_object(Bucket=bucket_name, Key=key)
+        return response['Body'].read()
+    except Exception as e:
+        st.error(f"Error downloading: {e}")
+        return None
+
+
+def _delete_from_s3(bucket_name: str, key: str) -> bool:
+    """Delete file from S3 bucket."""
+    if 'aws_credentials' not in st.session_state:
+        return False
+
+    creds = st.session_state.aws_credentials
+    s3_client = boto3.client(
+        's3',
+        aws_access_key_id=creds['AccessKeyId'],
+        aws_secret_access_key=creds['SecretKey'],
+        aws_session_token=creds['SessionToken'],
+        region_name='ap-southeast-2'
+    )
+
+    try:
+        s3_client.delete_object(Bucket=bucket_name, Key=key)
+        return True
+    except Exception as e:
+        st.error(f"Error deleting: {e}")
+        return False
+
+
+def _start_kb_ingestion(kb_id: str, ds_id: str) -> str:
+    """Start Bedrock Knowledge Base ingestion job."""
+    if 'aws_credentials' not in st.session_state:
+        return None
+
+    creds = st.session_state.aws_credentials
+    bedrock_agent = boto3.client(
+        'bedrock-agent',
+        aws_access_key_id=creds['AccessKeyId'],
+        aws_secret_access_key=creds['SecretKey'],
+        aws_session_token=creds['SessionToken'],
+        region_name='ap-southeast-2'
+    )
+
+    try:
+        response = bedrock_agent.start_ingestion_job(
+            knowledgeBaseId=kb_id,
+            dataSourceId=ds_id,
+            description="Auto-sync after file operation"
+        )
+        job_id = response['ingestionJob']['ingestionJobId']
+        return job_id
+    except Exception as e:
+        st.error(f"Error starting ingestion: {e}")
+        return None
+
+
+def _wait_for_ingestion_job(kb_id: str, ds_id: str, job_id: str, progress_bar, status_text) -> bool:
+    """Monitor ingestion job status with progress updates."""
+    if 'aws_credentials' not in st.session_state:
+        return False
+
+    creds = st.session_state.aws_credentials
+    bedrock_agent = boto3.client(
+        'bedrock-agent',
+        aws_access_key_id=creds['AccessKeyId'],
+        aws_secret_access_key=creds['SecretKey'],
+        aws_session_token=creds['SessionToken'],
+        region_name='ap-southeast-2'
+    )
+
+    try:
+        max_checks = 60  # Max 10 minutes (60 * 10 seconds)
+        check_count = 0
+
+        while check_count < max_checks:
+            response = bedrock_agent.get_ingestion_job(
+                knowledgeBaseId=kb_id,
+                dataSourceId=ds_id,
+                ingestionJobId=job_id
+            )
+
+            status = response['ingestionJob']['status']
+            check_count += 1
+
+            # Update progress bar (0 to 100%)
+            progress = min(check_count / max_checks, 0.95)  # Cap at 95% until complete
+            progress_bar.progress(progress)
+            status_text.text(f"Syncing Knowledge Base... Status: {status}")
+
+            if status == 'COMPLETE':
+                progress_bar.progress(1.0)
+                status_text.text("✅ Knowledge Base sync completed!")
+                return True
+            elif status in ['FAILED', 'STOPPED']:
+                status_text.text(f"⚠️ Sync ended with status: {status}")
+                return False
+
+            time.sleep(10)  # Wait 10 seconds between checks
+
+        status_text.text("⚠️ Sync timeout - job is still running")
+        return False
+
+    except Exception as e:
+        st.error(f"Error monitoring ingestion: {e}")
+        return False
+
+
+@st.dialog("📦 Knowledge Base Manager", width="large")
+def knowledge_base_manager_modal():
+    """Modal dialog for managing Knowledge Base S3 bucket - File Explorer style."""
+    KB_BUCKET = "nextgen-aws-helper-agent-kb-692859930013-ap-southeast-2"
+    KB_ROOT = "documents/"  # Root directory for the knowledge base
+    KB_ID = "PGTFK15IS1"
+    DS_ID = "SHZXLXGOK7"
+
+    if not st.session_state.aws_credentials:
+        st.warning("AWS credentials not available. Check cognito_config.json includes identity_pool_id and user_pool_id.")
+        return
+
+    # Initialize current path if not set or if it's outside KB_ROOT
+    if 's3_current_prefix' not in st.session_state or not st.session_state.s3_current_prefix.startswith(KB_ROOT):
+        st.session_state.s3_current_prefix = KB_ROOT
+
+    current_path = st.session_state.s3_current_prefix
+
+    # Header with bucket name
+    st.markdown(f"**Bucket:** `{KB_BUCKET}` • **Root:** `/documents`")
+
+    # Breadcrumb navigation - only show path relative to KB_ROOT
+    relative_path = current_path[len(KB_ROOT):] if current_path.startswith(KB_ROOT) else current_path
+    path_parts = relative_path.rstrip('/').split('/') if relative_path else []
+
+    # Calculate number of columns needed (root + path parts)
+    num_cols = len([p for p in path_parts if p]) + 1
+    col_crumbs = st.columns(num_cols + 1) if num_cols > 1 else st.columns(2)
+
+    with col_crumbs[0]:
+        if st.button("🏠", key="nav_root", help="Go to root"):
+            st.session_state.s3_current_prefix = KB_ROOT
+            st.rerun()
+
+    # Build breadcrumb trail
+    col_idx = 1
+    for idx, part in enumerate(path_parts):
+        if part:
+            with col_crumbs[col_idx]:
+                # Reconstruct path including KB_ROOT
+                path_to_here = KB_ROOT + '/'.join(path_parts[:idx + 1]) + '/'
+                if st.button(f"📁 {part}", key=f"nav_{idx}_{part}"):
+                    st.session_state.s3_current_prefix = path_to_here
+                    st.rerun()
+            col_idx += 1
+
+    # Action buttons
+    col1, col2, col3 = st.columns([1, 1, 4])
+    with col1:
+        if st.button("⬆️ Upload File", key="show_upload", use_container_width=True):
+            st.session_state.show_upload_form = True
+    with col2:
+        if st.button("📁 New Folder", key="show_new_folder", use_container_width=True):
+            st.session_state.show_folder_form = True
+
+    st.divider()
+
+    # Show upload form if toggled
+    if st.session_state.get('show_upload_form', False):
+        with st.container():
+            st.markdown("### Upload Files")
+            upload_files = st.file_uploader("Choose files", key="kb_uploader_modal", accept_multiple_files=True)
+
+            if upload_files:
+                st.info(f"**Selected {len(upload_files)} file(s)**")
+
+                # Show list of files to be uploaded
+                for upload_file in upload_files:
+                    st.text(f"📄 {upload_file.name} ({upload_file.size:,} bytes)")
+
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    if st.button("✅ Upload All", key="do_upload", type="primary"):
+                        progress_bar = st.progress(0)
+                        success_count = 0
+
+                        for idx, upload_file in enumerate(upload_files):
+                            upload_key = f"{current_path}{upload_file.name}"
+                            upload_file.seek(0)
+
+                            if _upload_to_s3(KB_BUCKET, upload_file, upload_key):
+                                success_count += 1
+
+                            # Update progress
+                            progress_bar.progress((idx + 1) / len(upload_files))
+
+                        if success_count == len(upload_files):
+                            st.success(f"✅ Uploaded all {success_count} file(s)")
+
+                            # Start ingestion job
+                            st.info("🔄 Starting Knowledge Base sync...")
+                            job_id = _start_kb_ingestion(KB_ID, DS_ID)
+
+                            if job_id:
+                                sync_progress = st.progress(0)
+                                sync_status = st.empty()
+
+                                if _wait_for_ingestion_job(KB_ID, DS_ID, job_id, sync_progress, sync_status):
+                                    st.success("✅ Files uploaded and Knowledge Base synced!")
+                                else:
+                                    st.warning("⚠️ Files uploaded but sync may still be in progress")
+                        else:
+                            st.warning(f"Uploaded {success_count} of {len(upload_files)} file(s)")
+
+                        st.session_state.show_upload_form = False
+                        time.sleep(2)
+                        st.rerun()
+                with col2:
+                    if st.button("❌ Cancel", key="cancel_upload"):
+                        st.session_state.show_upload_form = False
+                        st.rerun()
+            st.divider()
+
+    # Show new folder form if toggled
+    if st.session_state.get('show_folder_form', False):
+        with st.container():
+            st.markdown("### Create New Folder")
+            folder_name = st.text_input("Folder name:", key="new_folder_name")
+
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                if st.button("✅ Create", key="do_create_folder", type="primary"):
+                    if folder_name:
+                        # Create folder by uploading empty object with trailing /
+                        folder_key = f"{current_path}{folder_name}/"
+                        empty_file = io.BytesIO(b'')
+                        if _upload_to_s3(KB_BUCKET, empty_file, folder_key):
+                            st.success(f"Created folder: {folder_name}")
+
+                            # Start ingestion job
+                            st.info("🔄 Starting Knowledge Base sync...")
+                            job_id = _start_kb_ingestion(KB_ID, DS_ID)
+
+                            if job_id:
+                                sync_progress = st.progress(0)
+                                sync_status = st.empty()
+                                _wait_for_ingestion_job(KB_ID, DS_ID, job_id, sync_progress, sync_status)
+
+                            st.session_state.show_folder_form = False
+                            time.sleep(1)
+                            st.rerun()
+            with col2:
+                if st.button("❌ Cancel", key="cancel_folder"):
+                    st.session_state.show_folder_form = False
+                    st.rerun()
+            st.divider()
+
+    # List objects with delimiter to show folder structure
+    result = _list_s3_objects(KB_BUCKET, current_path, delimiter='/')
+    folders = result['folders']
+    files = result['files']
+
+    # Display folders and files
+    with st.container(height=450):
+        # Show folders first
+        if folders:
+            st.markdown("### 📁 Folders")
+            for folder_prefix in folders:
+                folder_name = folder_prefix.rstrip('/').split('/')[-1]
+
+                col1, col2 = st.columns([5, 1])
+                with col1:
+                    if st.button(f"📁 {folder_name}", key=f"folder_{folder_prefix}", use_container_width=True):
+                        st.session_state.s3_current_prefix = folder_prefix
+                        st.rerun()
+                with col2:
+                    if st.button("🗑️", key=f"del_folder_{folder_prefix}", help="Delete folder"):
+                        st.session_state.delete_confirm_key = folder_prefix
+                        st.rerun()
+
+                # Show confirmation dialog
+                if st.session_state.delete_confirm_key == folder_prefix:
+                    st.warning(f"⚠️ Delete folder **{folder_name}**? This will delete all contents.")
+                    col_confirm1, col_confirm2 = st.columns([1, 1])
+                    with col_confirm1:
+                        if st.button("✅ Confirm Delete", key=f"confirm_del_folder_{folder_prefix}", type="primary"):
+                            if _delete_from_s3(KB_BUCKET, folder_prefix):
+                                st.success(f"Deleted folder: {folder_name}")
+
+                                # Start ingestion job
+                                st.info("🔄 Starting Knowledge Base sync...")
+                                job_id = _start_kb_ingestion(KB_ID, DS_ID)
+
+                                if job_id:
+                                    sync_progress = st.progress(0)
+                                    sync_status = st.empty()
+                                    _wait_for_ingestion_job(KB_ID, DS_ID, job_id, sync_progress, sync_status)
+
+                                st.session_state.delete_confirm_key = None
+                                time.sleep(1)
+                                st.rerun()
+                    with col_confirm2:
+                        if st.button("❌ Cancel", key=f"cancel_del_folder_{folder_prefix}"):
+                            st.session_state.delete_confirm_key = None
+                            st.rerun()
+
+        # Show files
+        if files:
+            st.markdown("### 📄 Files")
+            for obj in files:
+                key = obj['Key']
+                size = obj['Size']
+                last_modified = obj['LastModified'].strftime('%Y-%m-%d %H:%M:%S')
+                filename = key.split('/')[-1] if '/' in key else key
+
+                col1, col2, col3 = st.columns([4, 1, 1])
+
+                with col1:
+                    st.markdown(f"**📄 {filename}**")
+                    st.caption(f"{size:,} bytes • {last_modified}")
+
+                with col2:
+                    file_data = _download_from_s3(KB_BUCKET, key)
+                    if file_data:
+                        st.download_button(
+                            label="⬇️",
+                            data=file_data,
+                            file_name=filename,
+                            key=f"dl_{key}",
+                            help="Download"
+                        )
+
+                with col3:
+                    if st.button("🗑️", key=f"del_{key}", help="Delete"):
+                        st.session_state.delete_confirm_key = key
+                        st.rerun()
+
+                # Show confirmation dialog
+                if st.session_state.delete_confirm_key == key:
+                    st.warning(f"⚠️ Delete file **{filename}**?")
+                    col_confirm1, col_confirm2 = st.columns([1, 1])
+                    with col_confirm1:
+                        if st.button("✅ Confirm Delete", key=f"confirm_del_{key}", type="primary"):
+                            if _delete_from_s3(KB_BUCKET, key):
+                                st.success(f"Deleted {filename}")
+
+                                # Start ingestion job
+                                st.info("🔄 Starting Knowledge Base sync...")
+                                job_id = _start_kb_ingestion(KB_ID, DS_ID)
+
+                                if job_id:
+                                    sync_progress = st.progress(0)
+                                    sync_status = st.empty()
+                                    _wait_for_ingestion_job(KB_ID, DS_ID, job_id, sync_progress, sync_status)
+
+                                st.session_state.delete_confirm_key = None
+                                time.sleep(1)
+                                st.rerun()
+                    with col_confirm2:
+                        if st.button("❌ Cancel", key=f"cancel_del_{key}"):
+                            st.session_state.delete_confirm_key = None
+                            st.rerun()
+
+                st.divider()
+
+        if not folders and not files:
+            st.info("📂 This folder is empty")
+
+
 def _parse_event_stream(response: dict) -> str:
     """Extract text from the boto3 EventStream response."""
     parts: list[str] = []
@@ -359,6 +823,7 @@ def _markdown_to_pdf(markdown_content: str) -> bytes:
 for key, default in {
     "logged_in": False,
     "jwt_token": None,
+    "id_token": None,
     "username": "",
     "chat_history": [],
     "agent_arn": None,
@@ -367,6 +832,13 @@ for key, default in {
     "last_request": None,
     "login_error": None,
     "session_id": None,
+    "aws_credentials": None,
+    "user_pool_id": None,
+    "s3_current_prefix": "documents/",
+    "show_upload_form": False,
+    "show_folder_form": False,
+    "kb_manager_open": False,
+    "delete_confirm_key": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -494,7 +966,32 @@ if not st.session_state.logged_in:
                 login_config = {**config, "username": username, "password": password}
                 try:
                     with st.spinner("Authenticating with Cognito..."):
-                        token = _get_bearer_token(login_config)
+                        cognito = boto3.client("cognito-idp", region_name=config["region"])
+                        auth = cognito.initiate_auth(
+                            ClientId=config["client_id"],
+                            AuthFlow="USER_PASSWORD_AUTH",
+                            AuthParameters={
+                                "USERNAME": username,
+                                "PASSWORD": password,
+                            },
+                        )
+                        access_token = auth["AuthenticationResult"]["AccessToken"]
+                        id_token = auth["AuthenticationResult"]["IdToken"]
+
+                    # Exchange ID token for AWS credentials if identity_pool_id exists
+                    aws_credentials = None
+                    if config.get("identity_pool_id") and config.get("user_pool_id"):
+                        with st.spinner("Getting AWS credentials..."):
+                            try:
+                                aws_credentials = _get_aws_credentials_from_cognito(
+                                    id_token,
+                                    config["identity_pool_id"],
+                                    config["user_pool_id"],
+                                    config["region"]
+                                )
+                                st.session_state.user_pool_id = config["user_pool_id"]
+                            except Exception as exc:
+                                st.warning(f"Could not get AWS credentials: {exc}")
 
                     # Resolve agent ARN right away
                     with st.spinner("Resolving agent ARN..."):
@@ -505,13 +1002,15 @@ if not st.session_state.logged_in:
                             st.session_state.arn_error = str(exc)
 
                     # Commit to session state
-                    st.session_state.jwt_token = token
-                    st.session_state.bearer_input = token  # pre-fill the token field
+                    st.session_state.jwt_token = access_token
+                    st.session_state.id_token = id_token
+                    st.session_state.bearer_input = access_token  # pre-fill the token field
                     st.session_state.username = username
                     st.session_state.logged_in = True
                     st.session_state.agent_arn = agent_arn
                     st.session_state.region = config.get("region", "us-east-1")
                     st.session_state.session_id = str(uuid.uuid4())  # Generate session ID
+                    st.session_state.aws_credentials = aws_credentials
                     st.session_state.login_error = None
                     st.rerun()
 
@@ -597,6 +1096,14 @@ with st.sidebar:
                 key="md_to_pdf_download",
                 use_container_width=True
             )
+
+    # Tool 3: Knowledge Base S3 Manager
+    if st.button("📦 Knowledge Base Manager", use_container_width=True, key="open_kb_manager"):
+        st.session_state.kb_manager_open = True
+
+# Open KB Manager modal if flag is set
+if st.session_state.kb_manager_open:
+    knowledge_base_manager_modal()
 
 # --- Main area ---
 # Display logo in the app
