@@ -331,33 +331,28 @@ def knowledge_base_manager_modal():
 
     current_path = st.session_state.s3_current_prefix
 
-    # Header with bucket name
-    st.markdown(f"**Bucket:** `{KB_BUCKET}` • **Root:** `/documents`")
-
-    # Breadcrumb navigation - only show path relative to KB_ROOT
+    # Breadcrumb navigation - clickable text
     relative_path = current_path[len(KB_ROOT):] if current_path.startswith(KB_ROOT) else current_path
-    path_parts = relative_path.rstrip('/').split('/') if relative_path else []
+    path_parts = [p for p in relative_path.rstrip('/').split('/') if p]
 
-    # Calculate number of columns needed (root + path parts)
-    num_cols = len([p for p in path_parts if p]) + 1
-    col_crumbs = st.columns(num_cols + 1) if num_cols > 1 else st.columns(2)
+    # Display breadcrumb with buttons
+    breadcrumb_cols = st.columns([0.1] + [0.15] * (len(path_parts) + 1) + [1])
 
-    with col_crumbs[0]:
-        if st.button("🏠", key="nav_root", help="Go to root"):
+    with breadcrumb_cols[0]:
+        st.markdown("**Path:**")
+
+    with breadcrumb_cols[1]:
+        if st.button("🏠 documents", key="breadcrumb_root", use_container_width=True):
             st.session_state.s3_current_prefix = KB_ROOT
             st.rerun()
 
-    # Build breadcrumb trail
-    col_idx = 1
+    # Add each path segment as a button
     for idx, part in enumerate(path_parts):
-        if part:
-            with col_crumbs[col_idx]:
-                # Reconstruct path including KB_ROOT
-                path_to_here = KB_ROOT + '/'.join(path_parts[:idx + 1]) + '/'
-                if st.button(f"📁 {part}", key=f"nav_{idx}_{part}"):
-                    st.session_state.s3_current_prefix = path_to_here
-                    st.rerun()
-            col_idx += 1
+        with breadcrumb_cols[idx + 2]:
+            path_value = KB_ROOT + '/'.join(path_parts[:idx + 1]) + '/'
+            if st.button(f"/ {part}", key=f"breadcrumb_{idx}_{part}", use_container_width=True):
+                st.session_state.s3_current_prefix = path_value
+                st.rerun()
 
     # Action buttons
     col1, col2, col3 = st.columns([1, 1, 4])
@@ -518,7 +513,7 @@ def knowledge_base_manager_modal():
                 last_modified = obj['LastModified'].strftime('%Y-%m-%d %H:%M:%S')
                 filename = key.split('/')[-1] if '/' in key else key
 
-                col1, col2, col3 = st.columns([4, 1, 1])
+                col1, col2, col3 = st.columns([6, 0.5, 0.5])
 
                 with col1:
                     st.markdown(f"**📄 {filename}**")
@@ -1100,6 +1095,7 @@ with st.sidebar:
     # Tool 3: Knowledge Base S3 Manager
     if st.button("📦 Knowledge Base Manager", use_container_width=True, key="open_kb_manager"):
         st.session_state.kb_manager_open = True
+        st.session_state.s3_current_prefix = "documents/"  # Reset to root on open
 
 # Open KB Manager modal if flag is set
 if st.session_state.kb_manager_open:
